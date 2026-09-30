@@ -33,7 +33,7 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdL
 	if (!bIsWow64)
 		MessageBox(NULL, L"This program only works on 64bit system", L"Error", MB_OK | MB_ICONERROR);
 
-	hWnd = CreateWindow(lpszClass, L"Snowshell v2.6.1 - Waifu2x Image Upscaler", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_BORDER, CW_USEDEFAULT, CW_USEDEFAULT, 530, 370, NULL, NULL, hInstance, NULL);
+	hWnd = CreateWindow(lpszClass, L"Snowshell v2.6.2 - Waifu2x Image Upscaler", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_BORDER, CW_USEDEFAULT, CW_USEDEFAULT, 530, 370, NULL, NULL, hInstance, NULL);
 
 	ShowWindow(hWnd, nCmdShow);
 
@@ -140,10 +140,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
 
 				DragQueryFile(hDrop, i, newFileName, fileLen);
 
-				if (FileExists(newFileName)) {
-					wstring newFile = newFileName;
-					dragFiles.push_back(newFile);
-				}
+				wstring newFile = newFileName;
+				dragFiles.push_back(newFile);
 				delete[] newFileName;
 			}
 		}
@@ -477,10 +475,21 @@ INT_PTR CALLBACK SettingDlgProcCugan(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM
 	return FALSE;
 }
 
+static void ShowInputError(HWND hWnd, LPCWSTR fileName, DWORD errorCode) {
+	WCHAR errorText[512] = {};
+	FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+		NULL, errorCode, 0, errorText, 512, NULL);
+	wstring message = L"Failed to read input:\n" + wstring(fileName)
+		+ L"\n\nWindows error " + std::to_wstring(errorCode) + L": " + errorText;
+	MessageBoxW(hWnd, message.c_str(), L"Error", MB_ICONERROR | MB_SYSTEMMODAL | MB_OK);
+}
+
 BOOL Execute(HWND hWnd, ConvertOption *convertOption, LPCWSTR fileName, bool noLabel) {
 	int FileNameLength;
 	int MaxInputLength;
-	if (!FileExists(fileName)) {
+	DWORD FileAttribute = GetFileAttributesW(fileName);
+	if (FileAttribute == INVALID_FILE_ATTRIBUTES) {
+		ShowInputError(hWnd, fileName, GetLastError());
 		return FALSE;
 	}
 
@@ -523,10 +532,9 @@ BOOL Execute(HWND hWnd, ConvertOption *convertOption, LPCWSTR fileName, bool noL
 	}
 
 	convertOption->setTTAEnabled(SnowSetting::getTTA());
+	convertOption->setTileSize(SnowSetting::getTileSize());
 	convertOption->setForceCPU(SnowSetting::getGPU() == GPU_CPU_MODE || SnowSetting::CurrentConverter == &SnowSetting::CONVERTER_CAFFE && !SnowSetting::checkCuda());
 	convertOption->setOutputFileExtension(SnowSetting::getOutputExt());
-
-	DWORD FileAttribute = GetFileAttributes(fileName);
 
 	// if input is directory
 	if (FILE_ATTRIBUTE_DIRECTORY & FileAttribute) {
@@ -572,8 +580,17 @@ BOOL Execute(HWND hWnd, ConvertOption *convertOption, LPCWSTR fileName, bool noL
 			hFind = FindFirstFileW((filePath + L"\\*.*").c_str(), &FileFindData);
 
 			if (INVALID_HANDLE_VALUE == hFind) {
-				FindClose(hFind);
-				return TRUE;
+				DWORD findError = GetLastError();
+				if (findError == ERROR_FILE_NOT_FOUND) {
+					DWORD folderAttributes = GetFileAttributesW(filePath.c_str());
+					if (folderAttributes != INVALID_FILE_ATTRIBUTES && (folderAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+						FolderSearchQueue.pop();
+						continue;
+					}
+					findError = folderAttributes == INVALID_FILE_ATTRIBUTES ? GetLastError() : ERROR_DIRECTORY;
+				}
+				ShowInputError(hWnd, filePath.c_str(), findError);
+				return FALSE;
 			}
 			do {
 				if (FileFindData.cFileName[0] == L'.')
@@ -595,24 +612,27 @@ BOOL Execute(HWND hWnd, ConvertOption *convertOption, LPCWSTR fileName, bool noL
 					FolderSearchQueue.push(NewFolderConvertOption);
 					continue;
 				}
-				else if (FILE_ATTRIBUTE_ARCHIVE & FileFindData.dwFileAttributes) {
+				else {
 					FolderConvertOption.setInputFilePath(FoundFilePath.c_str());
 					FolderConvertOption.setNoLabel(true);
 					SnowSetting::CurrentConverter->addQueue(&FolderConvertOption);
 				}
-				else
-					continue;
 
-			} while (FindNextFile(hFind, &FileFindData) != NULL);
+			} while (FindNextFileW(hFind, &FileFindData) != NULL);
 
+			DWORD findError = GetLastError();
 			FindClose(hFind);
+			if (findError != ERROR_NO_MORE_FILES) {
+				ShowInputError(hWnd, filePath.c_str(), findError);
+				return FALSE;
+			}
 			FolderSearchQueue.pop();
 		}
 
+		return TRUE;
 	}
 
-	if (FILE_ATTRIBUTE_ARCHIVE & FileAttribute)
-		SnowSetting::CurrentConverter->addQueue(convertOption);
+	SnowSetting::CurrentConverter->addQueue(convertOption);
 
 	return TRUE;
 }
